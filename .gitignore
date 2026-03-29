@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Neovim
+*.swp
+*.swo
+*~
+
+# Lua bytecode
+*.luac
+luac.out
+
+# Tags
+tags
