@@ -22,7 +22,26 @@ function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
   vim.keymap.set("v", M.config.keybind, function()
-    M.open({ range = true })
+    -- Capture the current visual selection BEFORE leaving visual mode.
+    -- The '< and '> marks are only updated after visual mode exits, so
+    -- reading them here would return the *previous* selection. Instead we
+    -- read the live selection endpoints directly.
+    local start_pos = vim.fn.getpos("v") -- visual start
+    local end_pos = vim.fn.getpos(".") -- cursor (visual end)
+
+    -- Normalize so start comes before end.
+    if start_pos[2] > end_pos[2] or (start_pos[2] == end_pos[2] and start_pos[3] > end_pos[3]) then
+      start_pos, end_pos = end_pos, start_pos
+    end
+
+    -- Leave visual mode.
+    vim.api.nvim_feedkeys(
+      vim.api.nvim_replace_termcodes("<Esc>", true, false, true),
+      "nx",
+      false
+    )
+
+    M.open({ range = true, start_pos = start_pos, end_pos = end_pos })
   end, { desc = "nvim-ask: open AI assistant" })
 
   vim.keymap.set("n", M.config.keybind, function()
@@ -59,8 +78,11 @@ function M._capture_context(opts)
   local selection = nil
 
   if opts.range then
-    local start_pos = vim.fn.getpos("'<")
-    local end_pos = vim.fn.getpos("'>")
+    -- Prefer explicit positions captured live from visual mode (see the
+    -- visual keymap in setup). Fall back to the '< / '> marks for the
+    -- :NvimAsk command path, which sets them correctly via command-line mode.
+    local start_pos = opts.start_pos or vim.fn.getpos("'<")
+    local end_pos = opts.end_pos or vim.fn.getpos("'>")
     local start_line = start_pos[2]
     local end_line = end_pos[2]
 
