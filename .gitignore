@@ -12,3 +12,6 @@ luac.out
 
 # Tags
 tags
+
+# Test dependencies (fetched by `make deps`)
+.tests/
