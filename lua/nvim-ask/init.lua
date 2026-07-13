@@ -2,6 +2,8 @@ local M = {}
 
 M.config = {
   keybind = "<leader>ai",
+  -- Which backend to use. See lua/nvim-ask/backends/ for the interface.
+  backend = "claude",
   window = {
     width = 0.8,
     height = 0.8,
@@ -9,6 +11,7 @@ M.config = {
     min_width = 40,
     min_height = 15,
   },
+  -- Backend-specific options. Each backend reads its own table (config_key).
   claude = {
     model = nil,
     timeout = 120,
@@ -17,8 +20,60 @@ M.config = {
 
 local current_state = nil
 
+--- Validate and normalize the merged config. Emits warnings and repairs
+--- invalid values rather than throwing, so a bad option never breaks setup.
+--- @param config table
+--- @return table config
+local function validate_config(config)
+  local backends = require("nvim-ask.backends")
+
+  if type(config.backend) ~= "string" then
+    vim.notify(
+      "nvim-ask: config.backend must be a string; falling back to 'claude'",
+      vim.log.levels.WARN
+    )
+    config.backend = "claude"
+  end
+
+  if not backends.get(config.backend) then
+    vim.notify(
+      string.format(
+        "nvim-ask: unknown backend '%s' (available: %s); falling back to 'claude'",
+        tostring(config.backend),
+        table.concat(backends.names(), ", ")
+      ),
+      vim.log.levels.WARN
+    )
+    config.backend = "claude"
+  end
+
+  -- Window fractions must be in (0, 1].
+  for _, key in ipairs({ "width", "height" }) do
+    local v = config.window[key]
+    if type(v) ~= "number" or v <= 0 or v > 1 then
+      vim.notify(
+        string.format("nvim-ask: window.%s must be a number in (0, 1]; using default", key),
+        vim.log.levels.WARN
+      )
+      config.window[key] = 0.8
+    end
+  end
+
+  local timeout = config.claude and config.claude.timeout
+  if timeout ~= nil and (type(timeout) ~= "number" or timeout < 0) then
+    vim.notify(
+      "nvim-ask: claude.timeout must be a non-negative number; using default 120",
+      vim.log.levels.WARN
+    )
+    config.claude.timeout = 120
+  end
+
+  return config
+end
+
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  M.config = validate_config(M.config)
 
   vim.keymap.set("v", M.config.keybind, function()
     -- Capture the current visual selection BEFORE leaving visual mode.
