@@ -72,10 +72,10 @@ function M.retry(state)
     return
   end
 
-  -- Stop any existing job
-  if state.job_id then
-    pcall(vim.fn.jobstop, state.job_id)
-    state.job_id = nil
+  -- Stop any existing request
+  if state.handle and state.backend then
+    pcall(state.backend.stop, state.handle)
+    state.handle = nil
   end
 
   -- Clear response

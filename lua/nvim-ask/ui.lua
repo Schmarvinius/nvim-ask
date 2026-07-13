@@ -106,7 +106,8 @@ function M.open(context, config)
     ns_id = vim.api.nvim_create_namespace("nvim_ask"),
     sending = false,
     accumulated_text = "",
-    job_id = nil,
+    backend = nil,
+    handle = nil,
     user_prompt = "",
   }
 
@@ -476,11 +477,27 @@ function M._send_prompt(state)
   -- Start spinner
   M._start_spinner(state)
 
-  -- Send to Claude
-  local claude = require("nvim-ask.claude")
-  local full_prompt = claude.build_prompt(state.context, user_prompt)
+  -- Resolve the configured backend and build the (provider-agnostic) prompt.
+  local backends = require("nvim-ask.backends")
+  local backend, err = backends.resolve(state.config)
+  if not backend then
+    state.sending = false
+    vim.bo[state.prompt_buf].modifiable = true
+    M._stop_spinner(state)
+    if state.response_buf and vim.api.nvim_buf_is_valid(state.response_buf) then
+      vim.bo[state.response_buf].modifiable = true
+      vim.api.nvim_buf_set_lines(state.response_buf, 0, -1, false, { "Error: " .. err })
+      vim.bo[state.response_buf].modifiable = false
+    end
+    return
+  end
+  state.backend = backend
 
-  state.job_id, state.timeout_timer = claude.send(full_prompt, state.config, {
+  local prompt = require("nvim-ask.prompt")
+  local full_prompt = prompt.build(state.context, user_prompt)
+  local opts = backends.opts(state.config, backend)
+
+  state.handle = backend.send(full_prompt, opts, {
     on_delta = function(text)
       M._stop_spinner(state)
       vim.schedule(function()
@@ -489,8 +506,8 @@ function M._send_prompt(state)
     end,
     on_complete = function(full_text)
       vim.schedule(function()
-        claude.stop_timer(state.timeout_timer)
-        state.timeout_timer = nil
+        backend.stop(state.handle)
+        state.handle = nil
         M._stop_spinner(state)
         state.sending = false
         -- Final update with complete text to ensure nothing is missed
@@ -515,8 +532,8 @@ function M._send_prompt(state)
     end,
     on_error = function(err)
       vim.schedule(function()
-        claude.stop_timer(state.timeout_timer)
-        state.timeout_timer = nil
+        backend.stop(state.handle)
+        state.handle = nil
         M._stop_spinner(state)
         state.sending = false
         vim.bo[state.prompt_buf].modifiable = true
@@ -570,16 +587,10 @@ function M.close(state)
 
   M._stop_spinner(state)
 
-  -- Stop any running job
-  if state.job_id then
-    pcall(vim.fn.jobstop, state.job_id)
-    state.job_id = nil
-  end
-
-  -- Stop timeout timer
-  if state.timeout_timer then
-    require("nvim-ask.claude").stop_timer(state.timeout_timer)
-    state.timeout_timer = nil
+  -- Stop any running request (job + timeout timer) via the backend.
+  if state.handle and state.backend then
+    pcall(state.backend.stop, state.handle)
+    state.handle = nil
   end
 
   -- Delete augroup first to prevent recursive cleanup
