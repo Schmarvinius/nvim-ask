@@ -276,6 +276,123 @@ function M.show_response_section(state)
   end, { buffer = response_buf })
 end
 
+--- Close the split (explanation + code) windows, if present
+function M._teardown_split(state)
+  for _, win in ipairs({ state.explanation_win, state.code_result_win }) do
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+  end
+  state.explanation_win = nil
+  state.explanation_buf = nil
+  state.code_result_win = nil
+  state.code_result_buf = nil
+  state.split_active = false
+end
+
+--- After a response completes, parse it and (if it contains both an
+--- explanation and a code block) replace the single response window with two
+--- windows: an explanation window (read-only) and a code window (actionable).
+function M._finalize_response(state)
+  local parser = require("nvim-ask.parser")
+  local parsed = parser.split_response(state.accumulated_text)
+
+  state.parsed_text = parsed.text
+  state.parsed_code = parsed.code
+  state.parsed_lang = parsed.lang
+
+  -- Only split when we have BOTH an explanation and code. Otherwise keep the
+  -- single response window (text-only or code-only cases).
+  if not (parsed.text and parsed.text ~= "" and parsed.code and parsed.code ~= "") then
+    return
+  end
+
+  -- Close the streaming response window; we replace it with two windows.
+  if state.response_win and vim.api.nvim_win_is_valid(state.response_win) then
+    pcall(vim.api.nvim_win_close, state.response_win, true)
+  end
+  state.response_win = nil
+
+  local layout = state.layout
+  local start_row = state.response_start_row
+  local avail = state.response_available_height
+
+  -- Split the available content height between the two bordered windows.
+  -- Two bordered windows consume (h1 + h2 + 4) visual rows; the single-window
+  -- case consumed (avail + 2). So h1 + h2 = avail - 2.
+  local total_content = math.max(avail - 2, 2)
+  local text_line_count = #vim.split(parsed.text, "\n", { plain = true })
+  local exp_height = math.min(text_line_count, math.max(math.floor(total_content * 0.4), 1))
+  exp_height = math.max(exp_height, 1)
+  local code_height = math.max(total_content - exp_height, 1)
+
+  local exp_row = start_row
+  local code_row = start_row + exp_height + 2 -- +2 for exp bottom border + code top border
+
+  -- Explanation window (read-only markdown)
+  local exp_lines = vim.split(parsed.text, "\n", { plain = true })
+  local exp_buf = create_buf({ lines = exp_lines, filetype = "markdown", modifiable = false })
+  state.explanation_buf = exp_buf
+  state.explanation_win = create_win(exp_buf, {
+    row = exp_row,
+    col = layout.inner_col,
+    width = layout.inner_width,
+    height = exp_height,
+    border = { "─", "─", "─", "│", "─", "─", "─", "│" },
+    title = " Explanation ",
+    footer = " <Tab> Code  |  q Close ",
+    zindex = 51,
+  }, false)
+  pcall(vim.treesitter.start, exp_buf, "markdown")
+  set_close_keymap(exp_buf, state)
+  vim.keymap.set("n", "<Tab>", function()
+    if state.code_result_win and vim.api.nvim_win_is_valid(state.code_result_win) then
+      vim.api.nvim_set_current_win(state.code_result_win)
+    end
+  end, { buffer = exp_buf })
+
+  -- Code window (syntax-highlighted, actionable)
+  local code_lines = vim.split(parsed.code, "\n", { plain = true })
+  local code_ft = state.context.filetype
+  if not code_ft or code_ft == "" then
+    code_ft = parsed.lang
+  end
+  local code_buf = create_buf({ lines = code_lines, filetype = code_ft, modifiable = false })
+  state.code_result_buf = code_buf
+  state.code_result_win = create_win(code_buf, {
+    row = code_row,
+    col = layout.inner_col,
+    width = layout.inner_width,
+    height = code_height,
+    border = { "─", "─", "─", "│", "─", "─", "─", "│" },
+    title = " Suggested Code ",
+    footer = " <CR> Apply  |  y Yank  |  r Retry  |  <Tab> Explanation  |  q Close ",
+    zindex = 51,
+  }, false)
+  set_close_keymap(code_buf, state)
+  vim.keymap.set("n", "<CR>", function()
+    get_actions().apply(state)
+  end, { buffer = code_buf })
+  vim.keymap.set("n", "y", function()
+    get_actions().yank(state)
+  end, { buffer = code_buf })
+  vim.keymap.set("n", "r", function()
+    get_actions().retry(state)
+  end, { buffer = code_buf })
+  vim.keymap.set("n", "<Tab>", function()
+    if state.explanation_win and vim.api.nvim_win_is_valid(state.explanation_win) then
+      vim.api.nvim_set_current_win(state.explanation_win)
+    end
+  end, { buffer = code_buf })
+
+  state.split_active = true
+
+  -- Focus the code window so Apply is immediately available.
+  if state.code_result_win and vim.api.nvim_win_is_valid(state.code_result_win) then
+    vim.api.nvim_set_current_win(state.code_result_win)
+  end
+end
+
 --- Update the response buffer with accumulated text
 function M.update_response(state, text)
   state.accumulated_text = state.accumulated_text .. text
@@ -328,6 +445,13 @@ function M._send_prompt(state)
   state.sending = true
   state.user_prompt = user_prompt
   state.accumulated_text = ""
+  state.parsed_text = nil
+  state.parsed_code = nil
+  state.parsed_lang = nil
+
+  -- Tear down any previous split layout (e.g. on retry) and restore the
+  -- single streaming response window.
+  M._teardown_split(state)
 
   -- Leave insert mode if in it
   vim.cmd("stopinsert")
@@ -367,7 +491,10 @@ function M._send_prompt(state)
           end
         end
         M.set_status(state, nil)
-        -- Focus response window
+        -- Parse the response and, when it contains both explanation and code,
+        -- replace the single response window with a split layout.
+        M._finalize_response(state)
+        -- Focus response window (only present when not split)
         if state.response_win and vim.api.nvim_win_is_valid(state.response_win) then
           vim.api.nvim_set_current_win(state.response_win)
         end
@@ -447,9 +574,19 @@ function M.close(state)
     state.augroup = nil
   end
 
-  -- Close windows
-  local wins = { state.container_win, state.code_win, state.prompt_win, state.response_win }
-  for _, win in ipairs(wins) do
+  -- Close windows. Note: some of these may be nil (e.g. response_win is
+  -- cleared when the split layout replaces it), so we must NOT use ipairs
+  -- over a table with nil holes — it would stop at the first nil.
+  local win_fields = {
+    "container_win",
+    "code_win",
+    "prompt_win",
+    "response_win",
+    "explanation_win",
+    "code_result_win",
+  }
+  for _, field in ipairs(win_fields) do
+    local win = state[field]
     if win and vim.api.nvim_win_is_valid(win) then
       pcall(vim.api.nvim_win_close, win, true)
     end
@@ -519,6 +656,39 @@ function M._relayout(state)
       width = layout.inner_width,
       height = response_height,
     })
+  end
+
+  -- Update split windows (explanation + code) if active
+  if state.split_active then
+    local total_content = math.max(state.response_available_height - 2, 2)
+    local exp_height = 1
+    if state.explanation_buf and vim.api.nvim_buf_is_valid(state.explanation_buf) then
+      local text_line_count = vim.api.nvim_buf_line_count(state.explanation_buf)
+      exp_height = math.min(text_line_count, math.max(math.floor(total_content * 0.4), 1))
+    end
+    exp_height = math.max(exp_height, 1)
+    local code_height = math.max(total_content - exp_height, 1)
+    local exp_row = state.response_start_row
+    local code_row = exp_row + exp_height + 2
+
+    if state.explanation_win and vim.api.nvim_win_is_valid(state.explanation_win) then
+      pcall(vim.api.nvim_win_set_config, state.explanation_win, {
+        relative = "editor",
+        row = exp_row,
+        col = layout.inner_col,
+        width = layout.inner_width,
+        height = exp_height,
+      })
+    end
+    if state.code_result_win and vim.api.nvim_win_is_valid(state.code_result_win) then
+      pcall(vim.api.nvim_win_set_config, state.code_result_win, {
+        relative = "editor",
+        row = code_row,
+        col = layout.inner_col,
+        width = layout.inner_width,
+        height = code_height,
+      })
+    end
   end
 end
 

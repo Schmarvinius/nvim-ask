@@ -15,8 +15,12 @@ function M.apply(state)
     return
   end
 
-  -- Extract code from response (prefer code block, fall back to full response)
-  local code = parser.get_primary_code(state.accumulated_text)
+  -- Prefer the code parsed at completion time (from the split layout).
+  -- Fall back to extracting the first code block, then to the raw response.
+  local code = state.parsed_code
+  if not code or code == "" then
+    code = parser.get_primary_code(state.accumulated_text)
+  end
   if not code then
     code = vim.trim(state.accumulated_text)
   end
@@ -52,7 +56,10 @@ function M.yank(state)
     return
   end
 
-  local code = parser.get_primary_code(state.accumulated_text)
+  local code = state.parsed_code
+  if not code or code == "" then
+    code = parser.get_primary_code(state.accumulated_text)
+  end
   local text = code or state.accumulated_text
 
   vim.fn.setreg("+", text)
