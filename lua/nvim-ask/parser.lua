@@ -53,4 +53,71 @@ function M.get_primary_code(text)
   return nil, nil
 end
 
+--- Split a response into an explanation part and a code part.
+--- Everything before the first code fence becomes the explanation `text`.
+--- The contents of the first fence becomes `code` (with its `lang`).
+--- Any prose after the fence is appended to `text` as a trailing note.
+--- @param text string the full response text
+--- @return table { text: string|nil, code: string|nil, lang: string|nil }
+function M.split_response(text)
+  local lines = vim.split(text or "", "\n", { plain = true })
+
+  local before = {}
+  local after = {}
+  local code_lines = {}
+  local lang = nil
+  local state = "before" -- before | in_code | after
+
+  for _, line in ipairs(lines) do
+    if state == "before" then
+      local l = line:match("^```(%w+)%s*$")
+      if l then
+        state = "in_code"
+        lang = l
+      elseif line:match("^```%s*$") then
+        state = "in_code"
+        lang = nil
+      else
+        table.insert(before, line)
+      end
+    elseif state == "in_code" then
+      if line:match("^```%s*$") then
+        state = "after"
+      else
+        table.insert(code_lines, line)
+      end
+    else -- after
+      table.insert(after, line)
+    end
+  end
+
+  -- Build the explanation text from before + after prose.
+  local text_parts = {}
+  local before_str = vim.trim(table.concat(before, "\n"))
+  if before_str ~= "" then
+    table.insert(text_parts, before_str)
+  end
+  local after_str = vim.trim(table.concat(after, "\n"))
+  if after_str ~= "" then
+    table.insert(text_parts, after_str)
+  end
+
+  local result = {
+    text = nil,
+    code = nil,
+    lang = lang,
+  }
+
+  if #text_parts > 0 then
+    result.text = table.concat(text_parts, "\n\n")
+  end
+
+  -- Only treat as code if we actually closed (or opened) a fence and captured content.
+  if state ~= "before" and #code_lines > 0 then
+    result.code = table.concat(code_lines, "\n")
+  end
+
+  return result
+end
+
 return M
