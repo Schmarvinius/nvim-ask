@@ -16,6 +16,17 @@ M.config = {
     model = nil,
     timeout = 120,
   },
+  -- Extra editor context to include in the prompt. See nvim-ask.context.
+  context = {
+    surrounding_lines = 0,
+    whole_file = false,
+    diagnostics = false,
+    git_diff = false,
+  },
+  -- When true, applying a suggestion first shows a diff you must confirm.
+  confirm_apply = true,
+  -- Additional / overriding preset prompt templates (merged over defaults).
+  presets = {},
 }
 
 local current_state = nil
@@ -68,6 +79,15 @@ local function validate_config(config)
     config.claude.timeout = 120
   end
 
+  local sl = config.context and config.context.surrounding_lines
+  if sl ~= nil and (type(sl) ~= "number" or sl < 0) then
+    vim.notify(
+      "nvim-ask: context.surrounding_lines must be a non-negative number; using 0",
+      vim.log.levels.WARN
+    )
+    config.context.surrounding_lines = 0
+  end
+
   return config
 end
 
@@ -112,9 +132,50 @@ function M.open(opts)
     return
   end
 
+  -- Resolve an initial prompt from an explicit prompt or a named preset.
+  local initial_prompt = opts.prompt
+  if not initial_prompt and opts.preset then
+    local presets = require("nvim-ask.presets")
+    initial_prompt = presets.get(M.config, opts.preset)
+    if not initial_prompt then
+      vim.notify(
+        "nvim-ask: unknown preset '" .. tostring(opts.preset) .. "'",
+        vim.log.levels.WARN
+      )
+    end
+  end
+
   local context = M._capture_context(opts)
   local ui = require("nvim-ask.ui")
-  current_state = ui.open(context, M.config)
+  current_state = ui.open(context, M.config, { initial_prompt = initial_prompt })
+end
+
+--- Open the overlay via a named preset, choosing interactively when no name
+--- (or an unknown name) is given.
+--- @param name string|nil
+--- @param opts table|nil forwarded to M.open (e.g. { range = true })
+function M.open_preset(name, opts)
+  opts = opts or {}
+  local presets = require("nvim-ask.presets")
+
+  if name and name ~= "" then
+    opts.preset = name
+    M.open(opts)
+    return
+  end
+
+  vim.ui.select(presets.names(M.config), { prompt = "nvim-ask preset:" }, function(choice)
+    if not choice then
+      return
+    end
+    opts.preset = choice
+    M.open(opts)
+  end)
+end
+
+--- Sorted list of preset names (for command completion).
+function M.preset_names()
+  return require("nvim-ask.presets").names(M.config)
 end
 
 function M.get_state()
@@ -152,12 +213,20 @@ function M._capture_context(opts)
     end
   end
 
-  return {
+  local context = {
     buf = buf,
     win = win,
     filetype = filetype,
     selection = selection,
   }
+
+  -- Gather optional extra context now, while the original buffer is current.
+  local ok, ctx = pcall(function()
+    return require("nvim-ask.context").gather(context, M.config.context)
+  end)
+  context.extra = (ok and ctx) or {}
+
+  return context
 end
 
 return M

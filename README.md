@@ -48,12 +48,22 @@ require("nvim-ask").setup({
     model = nil,                -- override model (e.g. "sonnet")
     timeout = 120,              -- request timeout in seconds
   },
+  confirm_apply = true,         -- preview a diff and confirm before applying
+  context = {                   -- extra editor context to include in prompts
+    surrounding_lines = 0,      -- N lines above/below the selection (0 = off)
+    whole_file = false,         -- include the entire file
+    diagnostics = false,        -- include LSP diagnostics for the selection
+    git_diff = false,           -- include `git diff` for the file
+  },
+  presets = {                   -- add or override preset prompt templates
+    -- mycheck = "Review this code for security issues.",
+  },
 })
 ```
 
 Invalid config values (unknown `backend`, out-of-range window fractions, a
-negative `timeout`) are reported via `vim.notify` and replaced with defaults
-rather than breaking `setup()`.
+negative `timeout`, a negative `context.surrounding_lines`) are reported via
+`vim.notify` and replaced with defaults rather than breaking `setup()`.
 
 ## Usage
 
@@ -73,17 +83,48 @@ rather than breaking `setup()`.
 
 You can also use the `:NvimAsk` command directly.
 
+### Presets
+
+Presets prefill the prompt with a common instruction (you can still edit before
+sending). Built-in presets: `explain`, `docs`, `tests`, `fix`, `refactor`,
+`optimize`. Add or override them via `config.presets`.
+
+- `:NvimAsk <preset>` — open with that preset (tab-completes preset names)
+- `:NvimAskPreset` — choose a preset interactively
+- `require("nvim-ask").open_preset("explain", { range = true })` — from Lua
+
+### Follow-up questions (multi-turn)
+
+After a response, the prompt is re-armed for a follow-up. Press `<Tab>` to focus
+the prompt, type a follow-up, and `<CR>` to send — the full conversation so far
+is included as context. `r` (Retry) re-runs the last turn, replacing it instead
+of stacking a duplicate.
+
+### Applying changes
+
+By default (`confirm_apply = true`), pressing `<CR>`/Apply first shows a diff of
+your selection vs. the suggested code; press `<CR>`/`y` to accept or `n`/`q` to
+cancel. Set `confirm_apply = false` to write immediately. When a response
+contains multiple code blocks you're asked which one to apply.
+
 ## Keybinds (inside the overlay)
 
 | Key | Context | Action |
 |---|---|---|
-| `<CR>` | Prompt buffer | Send request |
-| `<CR>` | Response buffer | Apply code to original buffer |
+| `<CR>` | Prompt buffer | Send request / follow-up |
+| `<CR>` | Response buffer | Apply code (with diff preview) |
 | `y` | Response buffer | Yank response to clipboard |
-| `r` | Response buffer | Retry (re-send same prompt) |
+| `r` | Response buffer | Retry (re-run last turn) |
 | `<Tab>` | Any | Cycle focus to next section |
 | `<S-Tab>` | Any | Cycle focus to previous section |
 | `q` | Any | Close the overlay |
+
+### Keybinds (inside the diff preview)
+
+| Key | Action |
+|---|---|
+| `<CR>` / `y` | Accept and apply |
+| `n` / `q` / `<Esc>` | Cancel |
 
 ## How it works
 
