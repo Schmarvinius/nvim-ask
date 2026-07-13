@@ -1,5 +1,29 @@
 local M = {}
 
+--- Match an opening code fence, capturing the language (may be empty).
+--- Accepts languages with non-word chars like `c++`, `c#`, `objective-c`,
+--- and tolerates trailing info strings after the language token.
+--- @param line string
+--- @return string|nil lang the captured language, or nil if not a fence
+local function match_fence_open(line)
+  -- Capture the first token after the backticks; allow a trailing info string.
+  local lang = line:match("^```([%w#+.-]*)")
+  if lang == nil then
+    return nil
+  end
+  if lang == "" then
+    return nil, true -- fence with no language
+  end
+  return lang
+end
+
+--- Whether a line closes a code fence.
+--- @param line string
+--- @return boolean
+local function is_fence_close(line)
+  return line:match("^```%s*$") ~= nil
+end
+
 --- Extract code blocks from markdown-formatted text
 --- @param text string the full response text
 --- @return table[] list of { lang: string|nil, code: string }
@@ -12,19 +36,19 @@ function M.extract_code_blocks(text)
 
   for _, line in ipairs(lines) do
     if not in_block then
-      local lang = line:match("^```(%w+)%s*$")
+      local lang, no_lang = match_fence_open(line)
       if lang then
         in_block = true
         current_lang = lang
         current_lines = {}
-      elseif line:match("^```%s*$") then
+      elseif no_lang then
         -- Code fence without language
         in_block = true
         current_lang = nil
         current_lines = {}
       end
     else
-      if line:match("^```%s*$") then
+      if is_fence_close(line) then
         -- End of code block
         table.insert(blocks, {
           lang = current_lang,
@@ -53,68 +77,73 @@ function M.get_primary_code(text)
   return nil, nil
 end
 
---- Split a response into an explanation part and a code part.
---- Everything before the first code fence becomes the explanation `text`.
---- The contents of the first fence becomes `code` (with its `lang`).
---- Any prose after the fence is appended to `text` as a trailing note.
+--- Split a response into an explanation part and its code block(s).
+--- All prose (before, between, and after fences) is collected into `text`.
+--- Every fenced code block is collected into `blocks` (in order). For
+--- backward compatibility, `code`/`lang` mirror the FIRST block.
 --- @param text string the full response text
---- @return table { text: string|nil, code: string|nil, lang: string|nil }
+--- @return table { text: string|nil, code: string|nil, lang: string|nil, blocks: table[] }
 function M.split_response(text)
   local lines = vim.split(text or "", "\n", { plain = true })
 
-  local before = {}
-  local after = {}
+  local prose = {}
+  local blocks = {}
   local code_lines = {}
-  local lang = nil
-  local state = "before" -- before | in_code | after
+  local current_lang = nil
+  local in_code = false
 
   for _, line in ipairs(lines) do
-    if state == "before" then
-      local l = line:match("^```(%w+)%s*$")
-      if l then
-        state = "in_code"
-        lang = l
-      elseif line:match("^```%s*$") then
-        state = "in_code"
-        lang = nil
+    if not in_code then
+      local lang, no_lang = match_fence_open(line)
+      if lang then
+        in_code = true
+        current_lang = lang
+        code_lines = {}
+      elseif no_lang then
+        in_code = true
+        current_lang = nil
+        code_lines = {}
       else
-        table.insert(before, line)
+        table.insert(prose, line)
       end
-    elseif state == "in_code" then
-      if line:match("^```%s*$") then
-        state = "after"
+    else
+      if is_fence_close(line) then
+        table.insert(blocks, {
+          lang = current_lang,
+          code = table.concat(code_lines, "\n"),
+        })
+        in_code = false
+        current_lang = nil
+        code_lines = {}
       else
         table.insert(code_lines, line)
       end
-    else -- after
-      table.insert(after, line)
     end
   end
 
-  -- Build the explanation text from before + after prose.
-  local text_parts = {}
-  local before_str = vim.trim(table.concat(before, "\n"))
-  if before_str ~= "" then
-    table.insert(text_parts, before_str)
-  end
-  local after_str = vim.trim(table.concat(after, "\n"))
-  if after_str ~= "" then
-    table.insert(text_parts, after_str)
+  -- Unterminated fence: still capture what we have as a block.
+  if in_code and #code_lines > 0 then
+    table.insert(blocks, {
+      lang = current_lang,
+      code = table.concat(code_lines, "\n"),
+    })
   end
 
   local result = {
     text = nil,
     code = nil,
-    lang = lang,
+    lang = nil,
+    blocks = blocks,
   }
 
-  if #text_parts > 0 then
-    result.text = table.concat(text_parts, "\n\n")
+  local prose_str = vim.trim(table.concat(prose, "\n"))
+  if prose_str ~= "" then
+    result.text = prose_str
   end
 
-  -- Only treat as code if we actually closed (or opened) a fence and captured content.
-  if state ~= "before" and #code_lines > 0 then
-    result.code = table.concat(code_lines, "\n")
+  if #blocks > 0 then
+    result.code = blocks[1].code
+    result.lang = blocks[1].lang
   end
 
   return result
