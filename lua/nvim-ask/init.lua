@@ -11,7 +11,6 @@ M.config = {
   },
   claude = {
     model = nil,
-    max_tokens = nil,
     timeout = 120,
   },
 }

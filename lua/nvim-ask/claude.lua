@@ -30,7 +30,7 @@ end
 --- @param prompt string the full prompt text
 --- @param config table plugin config
 --- @param callbacks table { on_delta: fn(text), on_complete: fn(full_text), on_error: fn(err) }
---- @return number|nil job_id
+--- @return number|nil job_id, userdata|nil timeout_timer
 function M.send(prompt, config, callbacks)
   -- Check claude is available
   if vim.fn.executable("claude") ~= 1 then
@@ -141,22 +141,30 @@ function M.send(prompt, config, callbacks)
     return nil
   end
 
-  -- Timeout timer
+  -- Timeout timer. Returned to the caller so it can be cancelled early when a
+  -- result arrives (or when the overlay is closed) instead of leaking until it
+  -- fires.
+  local timeout_timer = nil
   if config.claude.timeout and config.claude.timeout > 0 then
-    local timeout_timer = vim.uv.new_timer()
+    timeout_timer = vim.uv.new_timer()
     timeout_timer:start(config.claude.timeout * 1000, 0, vim.schedule_wrap(function()
       if not got_result then
         pcall(vim.fn.jobstop, job_id)
         callbacks.on_error("Request timed out after " .. config.claude.timeout .. " seconds")
       end
-      timeout_timer:stop()
-      timeout_timer:close()
+      M.stop_timer(timeout_timer)
     end))
-    -- Store on the return so the caller can clean up if needed
-    -- We'll return the job_id; the UI stores the timeout timer on state
   end
 
-  return job_id
+  return job_id, timeout_timer
+end
+
+--- Safely stop and close a libuv timer.
+function M.stop_timer(timer)
+  if timer and not timer:is_closing() then
+    timer:stop()
+    timer:close()
+  end
 end
 
 --- Stop a running Claude process

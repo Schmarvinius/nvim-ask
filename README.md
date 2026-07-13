@@ -45,7 +45,6 @@ require("nvim-ask").setup({
   },
   claude = {
     model = nil,                -- override model (e.g. "sonnet")
-    max_tokens = nil,           -- max output tokens
     timeout = 120,              -- request timeout in seconds
   },
 })

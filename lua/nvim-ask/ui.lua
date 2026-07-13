@@ -393,7 +393,9 @@ function M._finalize_response(state)
   end
 end
 
---- Update the response buffer with accumulated text
+--- Update the response buffer with a newly-streamed chunk of text.
+--- Only the trailing (in-progress) line and any new lines are touched, rather
+--- than rewriting the whole buffer on every delta.
 function M.update_response(state, text)
   state.accumulated_text = state.accumulated_text .. text
 
@@ -401,10 +403,18 @@ function M.update_response(state, text)
     return
   end
 
-  local lines = vim.split(state.accumulated_text, "\n", { plain = true })
+  -- The last buffer line is the current partial line; splice the new text
+  -- onto it and append whatever additional lines the chunk produced.
+  local tail = state._stream_tail or ""
+  local combined = tail .. text
+  local parts = vim.split(combined, "\n", { plain = true })
+
+  local last = vim.api.nvim_buf_line_count(state.response_buf)
   vim.bo[state.response_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.response_buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_lines(state.response_buf, last - 1, last, false, parts)
   vim.bo[state.response_buf].modifiable = false
+
+  state._stream_tail = parts[#parts]
 
   -- Scroll to bottom
   if state.response_win and vim.api.nvim_win_is_valid(state.response_win) then
@@ -445,6 +455,7 @@ function M._send_prompt(state)
   state.sending = true
   state.user_prompt = user_prompt
   state.accumulated_text = ""
+  state._stream_tail = ""
   state.parsed_text = nil
   state.parsed_code = nil
   state.parsed_lang = nil
@@ -469,7 +480,7 @@ function M._send_prompt(state)
   local claude = require("nvim-ask.claude")
   local full_prompt = claude.build_prompt(state.context, user_prompt)
 
-  state.job_id = claude.send(full_prompt, state.config, {
+  state.job_id, state.timeout_timer = claude.send(full_prompt, state.config, {
     on_delta = function(text)
       M._stop_spinner(state)
       vim.schedule(function()
@@ -478,6 +489,8 @@ function M._send_prompt(state)
     end,
     on_complete = function(full_text)
       vim.schedule(function()
+        claude.stop_timer(state.timeout_timer)
+        state.timeout_timer = nil
         M._stop_spinner(state)
         state.sending = false
         -- Final update with complete text to ensure nothing is missed
@@ -502,6 +515,8 @@ function M._send_prompt(state)
     end,
     on_error = function(err)
       vim.schedule(function()
+        claude.stop_timer(state.timeout_timer)
+        state.timeout_timer = nil
         M._stop_spinner(state)
         state.sending = false
         vim.bo[state.prompt_buf].modifiable = true
@@ -563,8 +578,7 @@ function M.close(state)
 
   -- Stop timeout timer
   if state.timeout_timer then
-    state.timeout_timer:stop()
-    state.timeout_timer:close()
+    require("nvim-ask.claude").stop_timer(state.timeout_timer)
     state.timeout_timer = nil
   end
 
