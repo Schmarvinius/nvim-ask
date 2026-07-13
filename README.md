@@ -7,6 +7,12 @@ An inline AI code assistant for Neovim, powered by the [Claude CLI](https://docs
 - Neovim >= 0.9
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude` in your PATH)
 
+## Health check
+
+Run `:checkhealth nvim-ask` to verify your setup. It reports the Neovim
+version, the registered/selected backend (via the backend's own `health()`),
+available presets, and which context providers are enabled.
+
 ## Installation
 
 ### lazy.nvim
@@ -168,6 +174,21 @@ require("nvim-ask").setup({ backend = "myprovider", myprovider = { --[[ opts ]] 
 
 The prompt sent to every backend is built by the provider-agnostic
 `nvim-ask.prompt` module.
+
+## Development
+
+Tests use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) (busted
+style) and live in `tests/spec/`.
+
+```sh
+make test          # run the suite headlessly
+make deps          # clone plenary into .tests/ (e.g. on CI or a clean machine)
+```
+
+`make test` discovers plenary from `PLENARY_DIR`, a local `.tests/` clone, or an
+existing install (lazy.nvim / packer). The suite covers the parser, prompt
+builder, presets, context providers, backend registry, diff preview, the health
+check, and a multi-turn + apply integration flow driven by a fake backend.
 
 ## License
 
