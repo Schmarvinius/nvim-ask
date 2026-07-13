@@ -86,11 +86,29 @@ local function set_close_keymap(buf, state)
   end, { buffer = buf, nowait = true })
 end
 
+--- Focus whichever response-side window currently exists: the single response
+--- window, or the split code/explanation windows.
+function M._focus_response_side(state)
+  local target = nil
+  if state.response_win and vim.api.nvim_win_is_valid(state.response_win) then
+    target = state.response_win
+  elseif state.code_result_win and vim.api.nvim_win_is_valid(state.code_result_win) then
+    target = state.code_result_win
+  elseif state.explanation_win and vim.api.nvim_win_is_valid(state.explanation_win) then
+    target = state.explanation_win
+  end
+  if target then
+    vim.api.nvim_set_current_win(target)
+  end
+end
+
 --- Open the full overlay UI
---- @param context table { buf, win, filetype, selection }
+--- @param context table { buf, win, filetype, selection, extra }
 --- @param config table plugin config
+--- @param ui_opts table|nil { initial_prompt: string }
 --- @return table state
-function M.open(context, config)
+function M.open(context, config, ui_opts)
+  ui_opts = ui_opts or {}
   local layout = compute_layout(config)
 
   -- Guard: terminal too small
@@ -109,6 +127,7 @@ function M.open(context, config)
     backend = nil,
     handle = nil,
     user_prompt = "",
+    messages = {}, -- conversation transcript for multi-turn follow-ups
   }
 
   -- Container (border-only window)
@@ -166,7 +185,11 @@ function M.open(context, config)
   -- Prompt section
   local prompt_height = 3
   local prompt_row = code_row + code_height + 1
-  local prompt_buf = create_buf({ lines = { "" } })
+  local prompt_initial = { "" }
+  if ui_opts.initial_prompt and ui_opts.initial_prompt ~= "" then
+    prompt_initial = vim.split(ui_opts.initial_prompt, "\n", { plain = true })
+  end
+  local prompt_buf = create_buf({ lines = prompt_initial })
   state.prompt_buf = prompt_buf
   state.prompt_win = create_win(prompt_buf, {
     row = prompt_row,
@@ -180,7 +203,15 @@ function M.open(context, config)
   }, true)
 
   -- Focus prompt in insert mode
-  vim.cmd("startinsert")
+  if ui_opts.initial_prompt and ui_opts.initial_prompt ~= "" then
+    -- Place the cursor at the end of the prefilled text.
+    local last = vim.api.nvim_buf_line_count(prompt_buf)
+    local last_line = vim.api.nvim_buf_get_lines(prompt_buf, last - 1, last, false)[1] or ""
+    pcall(vim.api.nvim_win_set_cursor, state.prompt_win, { last, #last_line })
+    vim.cmd("startinsert!")
+  else
+    vim.cmd("startinsert")
+  end
 
   -- Prompt keymaps
   set_close_keymap(prompt_buf, state)
@@ -194,9 +225,7 @@ function M.open(context, config)
   end, { buffer = prompt_buf })
 
   vim.keymap.set("n", "<Tab>", function()
-    if state.response_win and vim.api.nvim_win_is_valid(state.response_win) then
-      vim.api.nvim_set_current_win(state.response_win)
-    end
+    M._focus_response_side(state)
   end, { buffer = prompt_buf })
 
   -- Store remaining layout info for response section
@@ -301,6 +330,7 @@ function M._finalize_response(state)
   state.parsed_text = parsed.text
   state.parsed_code = parsed.code
   state.parsed_lang = parsed.lang
+  state.parsed_blocks = parsed.blocks or {}
 
   -- Only split when we have BOTH an explanation and code. Otherwise keep the
   -- single response window (text-only or code-only cases).
@@ -494,7 +524,9 @@ function M._send_prompt(state)
   state.backend = backend
 
   local prompt = require("nvim-ask.prompt")
-  local full_prompt = prompt.build(state.context, user_prompt)
+  -- Prior turns (excluding the current one) provide multi-turn context.
+  local history = vim.deepcopy(state.messages or {})
+  local full_prompt = prompt.build(state.context, user_prompt, { history = history })
   local opts = backends.opts(state.config, backend)
 
   state.handle = backend.send(full_prompt, opts, {
@@ -521,9 +553,14 @@ function M._send_prompt(state)
           end
         end
         M.set_status(state, nil)
+        -- Record the completed turn so follow-ups have the full transcript.
+        table.insert(state.messages, { role = "user", text = state.user_prompt })
+        table.insert(state.messages, { role = "assistant", text = state.accumulated_text })
         -- Parse the response and, when it contains both explanation and code,
         -- replace the single response window with a split layout.
         M._finalize_response(state)
+        -- Re-arm the prompt for a follow-up question (multi-turn).
+        M._prepare_followup(state)
         -- Focus response window (only present when not split)
         if state.response_win and vim.api.nvim_win_is_valid(state.response_win) then
           vim.api.nvim_set_current_win(state.response_win)
@@ -545,6 +582,23 @@ function M._send_prompt(state)
       end)
     end,
   })
+end
+
+--- Re-arm the prompt buffer so the user can ask a follow-up question in the
+--- same session. Clears the previous prompt, restores editability, and updates
+--- the footer hint. Does not steal focus from the response.
+function M._prepare_followup(state)
+  if not state.prompt_buf or not vim.api.nvim_buf_is_valid(state.prompt_buf) then
+    return
+  end
+  vim.bo[state.prompt_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.prompt_buf, 0, -1, false, { "" })
+  if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+    pcall(vim.api.nvim_win_set_config, state.prompt_win, {
+      footer = " <CR> Send follow-up  |  <Tab> Response  |  q Close ",
+      footer_pos = "center",
+    })
+  end
 end
 
 --- Spinner frames
